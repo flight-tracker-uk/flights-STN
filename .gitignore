@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.daytrip_cache.json
+.easyjet_cookies.json
+*.db
+*.db-shm
+*.db-wal
+.flightcache/
+*.log
+.env
+.DS_Store

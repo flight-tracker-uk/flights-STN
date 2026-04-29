@@ -1,0 +1,419 @@
+name: Nightly Flight Refresh
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      destinations:
+        description: 'Comma-separated IATA codes (e.g. AGP,CDG). Leave blank for all.'
+        required: false
+        type: string
+      months_ahead:
+        description: 'Number of months ahead to search (default: 6)'
+        required: false
+        type: string
+      specific_month:
+        description: 'Single month to scrape (YYYY-MM). Overrides months_ahead.'
+        required: false
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        destination:
+          - AAR
+          - ACE
+          - ADB
+          - AGA
+          - AGP
+          - ALC
+          - ALG
+          - AMM
+          - AMS
+          - AOI
+          - ARN
+          - ASR
+          - ATH
+          - AYT
+          - BCN
+          - BDS
+          - BER
+          - BFS
+          - BGY
+          - BIQ
+          - BJV
+          - BLQ
+          - BOJ
+          - BRE
+          - BRQ
+          - BSL
+          - BTS
+          - BUD
+          - BZG
+          - BZR
+          - CAG
+          - CCF
+          - CDT
+          - CFU
+          - CGN
+          - CHQ
+          - CIA
+          - CLJ
+          - CMF
+          - CMN
+          - CPH
+          - CTA
+          - DBV
+          - DLM
+          - DUB
+          - DXB
+          - EDI
+          - EFL
+          - EIN
+          - ESB
+          - ESU
+          - FAO
+          - FCO
+          - FEZ
+          - FKB
+          - FLR
+          - FMM
+          - FMO
+          - FNC
+          - FRA
+          - FUE
+          - GDN
+          - GLA
+          - GNB
+          - GOA
+          - GOT
+          - GRO
+          - GVA
+          - GZT
+          - HAM
+          - HEL
+          - HER
+          - IBZ
+          - INN
+          - IST
+          - JSI
+          - JTR
+          - KGS
+          - KIR
+          - KIV
+          - KLU
+          - KLX
+          - KRK
+          - KSC
+          - KTW
+          - KUN
+          - LBC
+          - LCA
+          - LCJ
+          - LDE
+          - LIG
+          - LIS
+          - LNZ
+          - LPA
+          - LUX
+          - MAD
+          - MAH
+          - MLA
+          - MRS
+          - MXP
+          - NAP
+          - NBE
+          - NCE
+          - NOC
+          - NQY
+          - NTE
+          - NUE
+          - NYO
+          - OLB
+          - OMR
+          - OPO
+          - ORK
+          - OSI
+          - OSL
+          - OSR
+          - OTP
+          - PDV
+          - PEG
+          - PFO
+          - PGF
+          - PIS
+          - PLQ
+          - PMI
+          - PMO
+          - POZ
+          - PRG
+          - PSA
+          - PSR
+          - PUY
+          - PVK
+          - RBA
+          - REG
+          - REU
+          - RHO
+          - RIX
+          - RMI
+          - RMU
+          - RTM
+          - RVN
+          - RZE
+          - SAW
+          - SCQ
+          - SDR
+          - SJJ
+          - SKG
+          - SNN
+          - SOF
+          - SPU
+          - SSH
+          - STR
+          - SUF
+          - SVQ
+          - SZG
+          - SZZ
+          - TFS
+          - TGD
+          - TIA
+          - TIV
+          - TLL
+          - TLS
+          - TLV
+          - TNG
+          - TPS
+          - TRF
+          - TRN
+          - TRS
+          - TSF
+          - TUF
+          - VCE
+          - VGO
+          - VIE
+          - VLC
+          - VNO
+          - VRN
+          - WAW
+          - WMI
+          - WRO
+          - XRY
+          - ZAD
+          - ZAG
+          - ZAZ
+          - ZRH
+          - ZTH
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Restore hash cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.flightcache/previous_hashes.json
+          key: hashes-${{ matrix.destination }}
+          restore-keys: hashes-${{ matrix.destination }}
+
+      - name: Check if destination is in filter
+        if: github.event.inputs.destinations != ''
+        id: filter
+        run: |
+          DESTS="${{ github.event.inputs.destinations }}"
+          DEST="${{ matrix.destination }}"
+          if echo "$DESTS" | tr ',' '\n' | grep -q "^${DEST}$"; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+          else
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate month list
+        if: steps.filter.outputs.skip != 'true'
+        id: months
+        run: |
+          SPECIFIC="${{ github.event.inputs.specific_month }}"
+          if [ -n "$SPECIFIC" ]; then
+            MONTH_LIST="$SPECIFIC"
+          else
+            MONTHS_AHEAD="${{ github.event.inputs.months_ahead }}"
+            MONTHS_AHEAD="${MONTHS_AHEAD:-6}"
+            MONTH_LIST=""
+            for i in $(seq 0 $((MONTHS_AHEAD - 1))); do
+              M=$(date -d "+${i} month" +%Y-%m 2>/dev/null || date -v+${i}m +%Y-%m)
+              MONTH_LIST="${MONTH_LIST}${M},"
+            done
+            MONTH_LIST="${MONTH_LIST%,}"
+          fi
+          echo "months=$MONTH_LIST" >> $GITHUB_OUTPUT
+          echo "Months to scrape: $MONTH_LIST"
+
+      - name: Record start time
+        if: steps.filter.outputs.skip != 'true'
+        run: echo "JOB_START=$(date -u +%Y-%m-%dT%H:%M:%S)" >> $GITHUB_ENV
+
+      - name: Scrape ${{ matrix.destination }}
+        if: steps.filter.outputs.skip != 'true'
+        id: scrape
+        run: |
+          SCRAPE_START=$(date +%s)
+          SCRAPE_OK=true
+          IFS=',' read -ra MONTHS <<< "${{ steps.months.outputs.months }}"
+          for MONTH in "${MONTHS[@]}"; do
+            echo "=== ${{ matrix.destination }} ${MONTH} ==="
+            python refresher.py --month "${MONTH}" --destinations "${{ matrix.destination }}" || SCRAPE_OK=false
+          done
+          SCRAPE_END=$(date +%s)
+          echo "scrape_duration=$((SCRAPE_END - SCRAPE_START))" >> $GITHUB_OUTPUT
+          echo "scrape_ok=$SCRAPE_OK" >> $GITHUB_OUTPUT
+
+      - name: Report scrape stats
+        if: always() && steps.filter.outputs.skip != 'true'
+        env:
+          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
+        run: |
+          if [ -f ~/.flightcache/last_stats.json ]; then
+            python -c "
+          from report_stats import report_scrape
+          report_scrape('STN', '${{ matrix.destination }}', open('$HOME/.flightcache/last_stats.json').read())
+          " || true
+          else
+            python -c "
+          from report_stats import report_error
+          report_error('STN', '${{ matrix.destination }}', 'scrape', 'No stats file generated')
+          " || true
+          fi
+
+      - name: Show results
+        if: always() && steps.filter.outputs.skip != 'true'
+        run: |
+          if [ -f ~/.flightcache/flights.db ]; then
+            echo "Database size: $(du -h ~/.flightcache/flights.db | cut -f1)"
+            python -c "
+          from cache_db import FlightCache
+          c = FlightCache()
+          s = c.get_stats()
+          print(f'Searches: {s[\"searches\"]}, Flights: {s[\"flights\"]}, Routes: {s[\"routes\"]}')
+          c.close()
+          "
+          fi
+
+      - name: Export and import to D1
+        if: always() && steps.filter.outputs.skip != 'true'
+        id: d1import
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
+        run: |
+          if [ -f ~/.flightcache/flights.db ]; then
+            # Export
+            EXPORT_START=$(date +%s)
+            python export_sql.py
+            EXPORT_END=$(date +%s)
+            EXPORT_DURATION=$((EXPORT_END - EXPORT_START))
+
+            DUMP_FILE="$HOME/.flightcache/d1_import.sql"
+            DUMP_SIZE=$(du -k "$DUMP_FILE" | cut -f1)
+            DUMP_LINES=$(wc -l < "$DUMP_FILE")
+            echo "SQL dump: ${DUMP_SIZE}KB, ${DUMP_LINES} lines, exported in ${EXPORT_DURATION}s"
+
+            # Report export stats from export_stats.json
+            python -c "
+          import json
+          from report_stats import report_export
+          with open('$HOME/.flightcache/export_stats.json') as f:
+              s = json.load(f)
+          report_export('STN', '${{ matrix.destination }}', s.get('exported_searches',0), s.get('exported_flights',0), s.get('skipped_unchanged',0), s.get('size_kb',0), ${EXPORT_DURATION})
+          " || true
+
+            # Import with retry tracking
+            IMPORT_START=$(date +%s)
+            ATTEMPT=0
+            IMPORT_OK=false
+            IMPORT_ERROR=""
+            for TRY in 1 2 3 4 5 6 7 8 9 10; do
+              ATTEMPT=$TRY
+              echo "D1 import attempt ${TRY}..."
+              if WRANGLER_SEND_METRICS=false wrangler d1 execute flights-cache \
+                --remote \
+                --file="$DUMP_FILE" \
+                --yes 2>&1; then
+                echo "D1 import complete for ${{ matrix.destination }}"
+                IMPORT_OK=true
+                break
+              else
+                IMPORT_ERROR="Attempt ${TRY} failed"
+                WAIT=$((RANDOM % 60 + 30))
+                echo "D1 busy, waiting ${WAIT}s before retry..."
+                sleep $WAIT
+              fi
+            done
+            IMPORT_END=$(date +%s)
+            IMPORT_DURATION=$((IMPORT_END - IMPORT_START))
+
+            echo "import_attempts=$ATTEMPT" >> $GITHUB_OUTPUT
+            echo "import_ok=$IMPORT_OK" >> $GITHUB_OUTPUT
+            echo "import_duration=$IMPORT_DURATION" >> $GITHUB_OUTPUT
+
+            # Report import stats
+            if [ "$IMPORT_OK" = "true" ]; then
+              IMPORT_PY=True
+            else
+              IMPORT_PY=False
+            fi
+            python -c "
+          from report_stats import report_import
+          report_import('STN', '${{ matrix.destination }}', ${ATTEMPT}, ${IMPORT_PY}, ${IMPORT_DURATION}, '${IMPORT_ERROR}')
+          " || true
+          fi
+
+      - name: Report job summary
+        if: always() && steps.filter.outputs.skip != 'true'
+        env:
+          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
+        run: |
+          JOB_END=$(date -u +%Y-%m-%dT%H:%M:%S)
+          python -c "
+          from report_stats import post_stats
+          import os
+          post_stats({
+              'airport': 'STN',
+              'destination': '${{ matrix.destination }}',
+              'run_date': '$(date -u +%Y-%m-%d)',
+              'run_id': os.environ.get('GITHUB_RUN_ID', ''),
+              'step': 'job_summary',
+              'status': 'success' if '${{ steps.scrape.outputs.scrape_ok }}' == 'true' else 'partial',
+              'started_at': '${JOB_START}',
+              'finished_at': '${JOB_END}',
+              'duration_secs': ${{ steps.scrape.outputs.scrape_duration || 0 }},
+              'import_attempts': ${{ steps.d1import.outputs.import_attempts || 0 }},
+              'import_success': 1 if '${{ steps.d1import.outputs.import_ok }}' == 'true' else 0,
+              'extra': '{\"scrape_ok\": \"${{ steps.scrape.outputs.scrape_ok }}\", \"import_ok\": \"${{ steps.d1import.outputs.import_ok }}\", \"import_duration\": ${{ steps.d1import.outputs.import_duration || 0 }}}',
+          })
+          " || true
+
+      - name: Save hash cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.flightcache/previous_hashes.json
+          key: hashes-${{ matrix.destination }}-${{ github.run_id }}

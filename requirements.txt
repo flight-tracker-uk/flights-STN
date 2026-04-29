@@ -1,0 +1,4 @@
+fast-flights>=2.2
+primp>=0.15.0,<1.0
+rich>=13.0
+requests

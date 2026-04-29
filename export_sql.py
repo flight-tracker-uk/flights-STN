@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Export local SQLite flight cache to a SQL dump file for D1 bulk import.
+
+Only exports searches where the content_hash has changed since the last export.
+Stores previous hashes in a JSON file so subsequent runs skip unchanged data.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+CACHE_DIR = Path.home() / ".flightcache"
+DB_PATH = CACHE_DIR / "flights.db"
+DUMP_PATH = CACHE_DIR / "d1_import.sql"
+HASH_PATH = CACHE_DIR / "previous_hashes.json"
+
+
+def escape_sql(val) -> str:
+    if val is None:
+        return "NULL"
+    if isinstance(val, (int, float)):
+        return str(val)
+    s = str(val).replace("'", "''")
+    return f"'{s}'"
+
+
+def load_previous_hashes() -> dict:
+    """Load content hashes from the previous run."""
+    if HASH_PATH.exists():
+        try:
+            with open(HASH_PATH) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_current_hashes(hashes: dict):
+    """Save current content hashes for next run comparison."""
+    with open(HASH_PATH, "w") as f:
+        json.dump(hashes, f)
+
+
+def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
+    local = sqlite3.connect(str(db_path))
+    local.row_factory = sqlite3.Row
+
+    previous_hashes = load_previous_hashes()
+    current_hashes = {}
+    skipped_unchanged = 0
+    exported_searches = 0
+    exported_flights = 0
+
+    # Collect all searches and determine which changed
+    all_searches = local.execute("SELECT * FROM searches").fetchall()
+    changed_searches = []
+    for s in all_searches:
+        key = f"{s['origin']}|{s['destination']}|{s['flight_date']}|{s['direction']}"
+        content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
+        current_hashes[key] = content_hash
+
+        prev_hash = previous_hashes.get(key)
+        # Skip if hash matches (including both being empty = no flights found both times)
+        if (content_hash == prev_hash) and prev_hash is not None:
+            skipped_unchanged += 1
+        else:
+            changed_searches.append(s)
+            # Log why it changed (first 5 only to avoid spam)
+            if len(changed_searches) <= 5:
+                if not prev_hash:
+                    logger.info(f"  CHANGED {key}: no previous hash (first run for this search)")
+                elif not content_hash:
+                    logger.info(f"  CHANGED {key}: no current hash (no flights found)")
+                else:
+                    logger.info(f"  CHANGED {key}: hash {prev_hash[:8]}→{content_hash[:8]}")
+
+    logger.info(f"Previous hashes loaded: {len(previous_hashes)}")
+    # Show sample of previous keys vs current keys to debug mismatches
+    prev_keys = set(previous_hashes.keys())
+    curr_keys = set(current_hashes.keys())
+    matched_keys = prev_keys & curr_keys
+    new_keys = curr_keys - prev_keys
+    gone_keys = prev_keys - curr_keys
+    logger.info(f"Keys: {len(matched_keys)} matched, {len(new_keys)} new, {len(gone_keys)} gone from previous")
+    if new_keys:
+        for k in sorted(new_keys)[:3]:
+            logger.info(f"  NEW KEY: {k}")
+    if gone_keys:
+        for k in sorted(gone_keys)[:3]:
+            logger.info(f"  GONE KEY: {k}")
+    # For matched keys, show how many have same hash
+    hash_matches = sum(1 for k in matched_keys if current_hashes[k] == previous_hashes[k])
+    hash_diffs = len(matched_keys) - hash_matches
+    logger.info(f"Matched keys: {hash_matches} same hash, {hash_diffs} hash changed")
+    logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped)")
+
+    if not changed_searches:
+        # Nothing changed — write minimal SQL
+        with open(dump_path, "w") as f:
+            f.write("-- No changes detected, nothing to import\nSELECT 1;\n")
+        save_current_hashes(current_hashes)
+        local.close()
+        logger.info("No changes — empty SQL dump")
+        return dump_path
+
+    with open(dump_path, "w") as f:
+        # Ensure indexes and history table exist
+        f.write("CREATE INDEX IF NOT EXISTS idx_flights_search_id ON flights(search_id);\n")
+        f.write("CREATE TABLE IF NOT EXISTS price_history (\n"
+                "  id INTEGER PRIMARY KEY, origin TEXT, destination TEXT, flight_date TEXT,\n"
+                "  direction TEXT, airline TEXT, departure_time TEXT, arrival_time TEXT,\n"
+                "  price REAL, currency TEXT DEFAULT 'GBP', recorded_at TEXT\n);\n\n")
+
+        # Upsert airports
+        airports = local.execute("SELECT * FROM airports").fetchall()
+        for a in airports:
+            f.write(
+                f"INSERT INTO airports(iata_code, name, country, is_origin) VALUES("
+                f"{escape_sql(a['iata_code'])}, {escape_sql(a['name'])}, "
+                f"{escape_sql(a['country'])}, {a['is_origin']}) "
+                f"ON CONFLICT(iata_code) DO UPDATE SET name=excluded.name, "
+                f"country=excluded.country, is_origin=MAX(is_origin, excluded.is_origin);\n"
+            )
+        logger.info(f"Exported {len(airports)} airports")
+
+        # Upsert routes
+        routes = local.execute("SELECT * FROM routes").fetchall()
+        for r in routes:
+            f.write(
+                f"INSERT INTO routes(origin, destination, dest_name, is_active, last_scraped) VALUES("
+                f"{escape_sql(r['origin'])}, {escape_sql(r['destination'])}, "
+                f"{escape_sql(r['dest_name'])}, {r['is_active']}, datetime('now')) "
+                f"ON CONFLICT(origin, destination) DO UPDATE SET "
+                f"dest_name=excluded.dest_name, is_active=excluded.is_active, last_scraped=datetime('now');\n"
+            )
+        f.write("\n")
+        logger.info(f"Exported {len(routes)} routes")
+
+        # Only delete and re-insert CHANGED searches
+        history_count = 0
+        for s in changed_searches:
+            o, d, fd = s["origin"], s["destination"], s["flight_date"]
+            direction = s["direction"]
+            searched_at = s["searched_at"]
+
+            # Get flights for this search
+            flights = local.execute("""
+                SELECT f.* FROM flights f WHERE f.search_id = ?
+            """, (s["id"],)).fetchall()
+
+            # Log new prices to price_history (append-only, never deleted)
+            for fl in flights:
+                f.write(
+                    f"INSERT INTO price_history(origin, destination, flight_date, direction, "
+                    f"airline, departure_time, arrival_time, price, currency, recorded_at) VALUES("
+                    f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
+                    f"{escape_sql(fl['airline'])}, {escape_sql(fl['departure_time'])}, "
+                    f"{escape_sql(fl['arrival_time'])}, {fl['price']}, "
+                    f"{escape_sql(fl['currency'])}, {escape_sql(searched_at)});\n"
+                )
+                history_count += 1
+
+            # Delete old data for this specific search
+            f.write(f"DELETE FROM flights WHERE search_id IN "
+                    f"(SELECT id FROM searches WHERE origin={escape_sql(o)} "
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)});\n")
+            f.write(f"DELETE FROM searches WHERE origin={escape_sql(o)} "
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)};\n")
+
+            # Insert search
+            content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
+            f.write(
+                f"INSERT INTO searches(origin, destination, flight_date, direction, "
+                f"searched_at, status, error_message, flight_count, content_hash) VALUES("
+                f"{escape_sql(s['origin'])}, {escape_sql(s['destination'])}, "
+                f"{escape_sql(s['flight_date'])}, {escape_sql(s['direction'])}, "
+                f"{escape_sql(s['searched_at'])}, {escape_sql(s['status'])}, "
+                f"{escape_sql(s['error_message'])}, {s['flight_count']}, "
+                f"{escape_sql(content_hash)});\n"
+            )
+            exported_searches += 1
+
+            search_ref = (
+                f"(SELECT id FROM searches WHERE origin={escape_sql(s['origin'])} "
+                f"AND destination={escape_sql(s['destination'])} "
+                f"AND flight_date={escape_sql(s['flight_date'])} "
+                f"AND direction={escape_sql(s['direction'])})"
+            )
+
+            for fl in flights:
+                f.write(
+                    f"INSERT INTO flights(search_id, airline, departure_time, arrival_time, "
+                    f"depart_minutes, arrive_minutes, price, currency, stops, arrival_ahead, created_at) VALUES("
+                    f"{search_ref}, {escape_sql(fl['airline'])}, "
+                    f"{escape_sql(fl['departure_time'])}, {escape_sql(fl['arrival_time'])}, "
+                    f"{fl['depart_minutes']}, {fl['arrive_minutes']}, "
+                    f"{fl['price']}, {escape_sql(fl['currency'])}, "
+                    f"{fl['stops']}, {escape_sql(fl['arrival_ahead'])}, "
+                    f"{escape_sql(fl['created_at'])});\n"
+                )
+                exported_flights += 1
+
+    # Save hashes for next run
+    save_current_hashes(current_hashes)
+
+    local.close()
+    size_kb = dump_path.stat().st_size / 1024
+    logger.info(f"Exported {exported_searches} searches, {exported_flights} flights, {history_count} price history records ({size_kb:.0f} KB)")
+    logger.info(f"Skipped {skipped_unchanged} unchanged searches")
+
+    # Write export stats JSON for CI reporting
+    export_stats = {
+        "exported_searches": exported_searches,
+        "exported_flights": exported_flights,
+        "skipped_unchanged": skipped_unchanged,
+        "changed_searches": len(changed_searches),
+        "total_searches": len(all_searches),
+        "history_records": history_count,
+        "size_kb": round(size_kb, 1),
+    }
+    stats_path = dump_path.parent / "export_stats.json"
+    with open(stats_path, "w") as f:
+        json.dump(export_stats, f)
+
+    return dump_path
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    db_path = Path(os.environ.get("DB_PATH", str(DB_PATH)))
+    dump_path = Path(os.environ.get("DUMP_PATH", str(DUMP_PATH)))
+
+    if not db_path.exists():
+        logger.error(f"Database not found: {db_path}")
+        return 1
+
+    export(db_path, dump_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
