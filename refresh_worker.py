@@ -74,6 +74,7 @@ class RefreshStats:
         self.total = 0
         self.flights_found = 0
         self.flights_skipped_no_time = 0
+        self.flights_skipped_zero_price = 0
         self.flights_filtered = 0
         self.unchanged = 0
         self.no_results = 0
@@ -100,6 +101,7 @@ class RefreshStats:
             f"Skipped (fresh):     {self.skipped}",
             f"Flights found:       {self.flights_found}",
             f"Flights skipped:     {self.flights_skipped_no_time} (no time data)",
+            f"Flights zero price:  {self.flights_skipped_zero_price} (£0 excluded)",
             f"Flights filtered:    {self.flights_filtered} (wrong time/stops for day trips)",
             f"Unchanged searches:  {self.unchanged} (data identical, skip D1 write)",
             f"Destinations:        {len(self.destinations_searched)}",
@@ -233,7 +235,7 @@ def run_refresh(
 
                     price = _parse_price(f.price)
                     if price <= 0:
-                        skipped_filtered += 1
+                        stats.flights_skipped_zero_price += 1
                         continue
 
                     flights.append({

@@ -125,6 +125,7 @@ def main() -> int:
         "flights_found": stats.flights_found,
         "flights_filtered": stats.flights_filtered,
         "flights_skipped_no_time": stats.flights_skipped_no_time,
+        "flights_skipped_zero_price": stats.flights_skipped_zero_price,
         "rate_limits": stats.rate_limits,
         "scrape_time": round(stats.scrape_time, 1),
         "rate_limit_wait_time": round(stats.rate_limit_wait_time, 1),
@@ -141,7 +142,7 @@ def main() -> int:
         try:
             prev = json.loads(stats_path.read_text())
             for key in ["total", "completed", "failed", "no_results", "flights_found",
-                         "flights_filtered", "flights_skipped_no_time", "rate_limits", "unchanged"]:
+                         "flights_filtered", "flights_skipped_no_time", "flights_skipped_zero_price", "rate_limits", "unchanged"]:
                 stats_json[key] = stats_json.get(key, 0) + prev.get(key, 0)
             stats_json["scrape_time"] = round(stats_json["scrape_time"] + prev.get("scrape_time", 0), 1)
             stats_json["rate_limit_wait_time"] = round(stats_json["rate_limit_wait_time"] + prev.get("rate_limit_wait_time", 0), 1)

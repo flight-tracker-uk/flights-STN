@@ -65,6 +65,7 @@ def report_scrape(airport: str, destination: str, stats_json: str):
         "unchanged": stats.get("unchanged", 0),
         "extra": json.dumps({
             "flights_skipped_no_time": stats.get("flights_skipped_no_time", 0),
+            "flights_skipped_zero_price": stats.get("flights_skipped_zero_price", 0),
             "destinations_searched": stats.get("destinations_searched", 0),
             "dates_searched": stats.get("dates_searched", 0),
             "avg_per_search": stats.get("avg_per_search", 0),
