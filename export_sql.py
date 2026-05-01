@@ -177,11 +177,11 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
             f.write(
                 f"INSERT INTO searches(origin, destination, flight_date, direction, "
-                f"searched_at, status, error_message, flight_count, content_hash) VALUES("
+                f"searched_at, status, error_message, content_hash) VALUES("
                 f"{escape_sql(s['origin'])}, {escape_sql(s['destination'])}, "
                 f"{escape_sql(s['flight_date'])}, {escape_sql(s['direction'])}, "
                 f"{escape_sql(s['searched_at'])}, {escape_sql(s['status'])}, "
-                f"{escape_sql(s['error_message'])}, {s['flight_count']}, "
+                f"{escape_sql(s['error_message'])}, "
                 f"{escape_sql(content_hash)});\n"
             )
             exported_searches += 1
@@ -196,13 +196,12 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             for fl in flights:
                 f.write(
                     f"INSERT INTO flights(search_id, airline, departure_time, arrival_time, "
-                    f"depart_minutes, arrive_minutes, price, currency, stops, arrival_ahead, created_at) VALUES("
+                    f"depart_minutes, arrive_minutes, price, stops, arrival_ahead) VALUES("
                     f"{search_ref}, {escape_sql(fl['airline'])}, "
                     f"{escape_sql(fl['departure_time'])}, {escape_sql(fl['arrival_time'])}, "
                     f"{fl['depart_minutes']}, {fl['arrive_minutes']}, "
-                    f"{fl['price']}, {escape_sql(fl['currency'])}, "
-                    f"{fl['stops']}, {escape_sql(fl['arrival_ahead'])}, "
-                    f"{escape_sql(fl['created_at'])});\n"
+                    f"{fl['price']}, "
+                    f"{fl['stops']}, {escape_sql(fl['arrival_ahead'])});\n"
                 )
                 exported_flights += 1
 
