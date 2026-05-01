@@ -120,12 +120,12 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         return dump_path
 
     with open(dump_path, "w") as f:
-        # Ensure indexes and history table exist
+        # Ensure indexes and history table exist (compacted shape — see #367 #5).
         f.write("CREATE INDEX IF NOT EXISTS idx_flights_search_id ON flights(search_id);\n")
         f.write("CREATE TABLE IF NOT EXISTS price_history (\n"
-                "  id INTEGER PRIMARY KEY, origin TEXT, destination TEXT, flight_date TEXT,\n"
-                "  direction TEXT, airline TEXT, departure_time TEXT, arrival_time TEXT,\n"
-                "  price REAL, currency TEXT DEFAULT 'GBP', recorded_at TEXT\n);\n\n")
+                "  id INTEGER PRIMARY KEY, origin TEXT NOT NULL, destination TEXT NOT NULL,\n"
+                "  flight_date TEXT NOT NULL, direction TEXT NOT NULL,\n"
+                "  price REAL NOT NULL, recorded_at TEXT NOT NULL\n);\n\n")
 
         # Upsert airports
         airports = local.execute("SELECT * FROM airports").fetchall()
@@ -164,15 +164,17 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
                 SELECT f.* FROM flights f WHERE f.search_id = ?
             """, (s["id"],)).fetchall()
 
-            # Log new prices to price_history (append-only, never deleted)
-            for fl in flights:
+            # Log only the cheapest price per (route, date, direction, scrape-day)
+            # to price_history — append-only, never deleted. The price-history
+            # modal only ever uses MIN(price) per scrape window, so storing
+            # every flight option was wasted writes (#367 item #5).
+            if flights:
+                cheapest_price = min(fl["price"] for fl in flights)
                 f.write(
                     f"INSERT INTO price_history(origin, destination, flight_date, direction, "
-                    f"airline, departure_time, arrival_time, price, currency, recorded_at) VALUES("
+                    f"price, recorded_at) VALUES("
                     f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
-                    f"{escape_sql(fl['airline'])}, {escape_sql(fl['departure_time'])}, "
-                    f"{escape_sql(fl['arrival_time'])}, {fl['price']}, "
-                    f"{escape_sql(fl['currency'])}, {escape_sql(searched_at)});\n"
+                    f"{cheapest_price}, {escape_sql(searched_at)});\n"
                 )
                 history_count += 1
 
