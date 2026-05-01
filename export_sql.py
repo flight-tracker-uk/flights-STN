@@ -30,6 +30,16 @@ def escape_sql(val) -> str:
     return f"'{s}'"
 
 
+def strip_date_suffix(val):
+    """Drop "on Sun 1 Nov"-style suffix from flight time strings — the date is
+    already implied by searches.flight_date, so storing it on every row is waste.
+    See card #367 item #4."""
+    if val is None:
+        return None
+    s = str(val)
+    return s.split(" on ", 1)[0] if " on " in s else s
+
+
 def load_previous_hashes() -> dict:
     """Load content hashes from the previous run."""
     if HASH_PATH.exists():
@@ -198,7 +208,7 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
                     f"INSERT INTO flights(search_id, airline, departure_time, arrival_time, "
                     f"depart_minutes, arrive_minutes, price, stops, arrival_ahead) VALUES("
                     f"{search_ref}, {escape_sql(fl['airline'])}, "
-                    f"{escape_sql(fl['departure_time'])}, {escape_sql(fl['arrival_time'])}, "
+                    f"{escape_sql(strip_date_suffix(fl['departure_time']))}, {escape_sql(strip_date_suffix(fl['arrival_time']))}, "
                     f"{fl['depart_minutes']}, {fl['arrive_minutes']}, "
                     f"{fl['price']}, "
                     f"{fl['stops']}, {escape_sql(fl['arrival_ahead'])});\n"
