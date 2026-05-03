@@ -70,6 +70,7 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     # Collect all searches and determine which changed
     all_searches = local.execute("SELECT * FROM searches").fetchall()
     changed_searches = []
+    skipped_no_results = 0
     for s in all_searches:
         key = f"{s['origin']}|{s['destination']}|{s['flight_date']}|{s['direction']}"
         content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
@@ -79,16 +80,26 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         # Skip if hash matches (including both being empty = no flights found both times)
         if (content_hash == prev_hash) and prev_hash is not None:
             skipped_unchanged += 1
-        else:
-            changed_searches.append(s)
-            # Log why it changed (first 5 only to avoid spam)
-            if len(changed_searches) <= 5:
-                if not prev_hash:
-                    logger.info(f"  CHANGED {key}: no previous hash (first run for this search)")
-                elif not content_hash:
-                    logger.info(f"  CHANGED {key}: no current hash (no flights found)")
-                else:
-                    logger.info(f"  CHANGED {key}: hash {prev_hash[:8]}→{content_hash[:8]}")
+            continue
+
+        # Skip syncing no_results / error rows to D1 (card #385 option 1).
+        # The Worker's read paths all filter status='success', and these rows
+        # accumulated to 62% of the searches table before being pruned. Local
+        # SQLite still records them so the hash-skip on subsequent runs is
+        # unaffected.
+        if s['status'] != 'success':
+            skipped_no_results += 1
+            continue
+
+        changed_searches.append(s)
+        # Log why it changed (first 5 only to avoid spam)
+        if len(changed_searches) <= 5:
+            if not prev_hash:
+                logger.info(f"  CHANGED {key}: no previous hash (first run for this search)")
+            elif not content_hash:
+                logger.info(f"  CHANGED {key}: no current hash (no flights found)")
+            else:
+                logger.info(f"  CHANGED {key}: hash {prev_hash[:8]}→{content_hash[:8]}")
 
     logger.info(f"Previous hashes loaded: {len(previous_hashes)}")
     # Show sample of previous keys vs current keys to debug mismatches
@@ -108,7 +119,7 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     hash_matches = sum(1 for k in matched_keys if current_hashes[k] == previous_hashes[k])
     hash_diffs = len(matched_keys) - hash_matches
     logger.info(f"Matched keys: {hash_matches} same hash, {hash_diffs} hash changed")
-    logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped)")
+    logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped), {skipped_no_results} non-success (skipped, not synced to D1)")
 
     if not changed_searches:
         # Nothing changed — write minimal SQL
