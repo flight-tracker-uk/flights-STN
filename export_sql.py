@@ -30,6 +30,19 @@ def escape_sql(val) -> str:
     return f"'{s}'"
 
 
+def stable_search_id(origin: str, destination: str, flight_date: str, direction: str) -> int:
+    """Compute a deterministic 63-bit positive INTEGER search_id from the
+    UNIQUE key. Same key always produces the same id — eliminates the
+    `(SELECT id FROM searches WHERE ...)` subquery that flight inserts
+    previously paid (one indexed read per flight). See card #385 option 5.
+
+    Birthday-collision odds with 826k rows in a 63-bit space: ~3.7e-8.
+    """
+    import hashlib as _h
+    digest = _h.sha256(f"{origin}|{destination}|{flight_date}|{direction}".encode()).digest()
+    return int.from_bytes(digest[:8], 'big') & 0x7FFFFFFFFFFFFFFF
+
+
 def strip_date_suffix(val):
     """Drop "on Sun 1 Nov"-style suffix from flight time strings — the date is
     already implied by searches.flight_date, so storing it on every row is waste.
@@ -192,12 +205,22 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         else:
             logger.info(f"Skipped {len(routes)} routes (hash unchanged)")
 
-        # Only delete and re-insert CHANGED searches
+        # Only delete and re-insert CHANGED searches.
+        # Per-search emission shape (#385 options 5 + 2):
+        #   (optional) INSERT INTO price_history ...
+        #   DELETE FROM flights WHERE search_id IN (...by content key — also
+        #     catches legacy auto-id rows being replaced by hash-id ones)
+        #   DELETE FROM searches WHERE origin=? AND destination=? AND flight_date=?
+        #   INSERT INTO searches(id, ...) VALUES(<stable_id>, ...)
+        #   INSERT INTO flights(search_id, ...) VALUES(<stable_id>, ...), (<stable_id>, ...)
+        # All flights for the search are batched into ONE multi-row INSERT,
+        # using the explicit deterministic id — no FK subquery needed.
         history_count = 0
         for s in changed_searches:
             o, d, fd = s["origin"], s["destination"], s["flight_date"]
             direction = s["direction"]
             searched_at = s["searched_at"]
+            sid = stable_search_id(o, d, fd, direction)
 
             # Get flights for this search
             flights = local.execute("""
@@ -218,19 +241,21 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
                 )
                 history_count += 1
 
-            # Delete old data for this specific search
+            # Delete old data for this specific search. The DELETE FROM flights
+            # uses the by-content-key subquery so legacy auto-id flight rows
+            # still get cleaned up during the auto-id -> hash-id transition.
             f.write(f"DELETE FROM flights WHERE search_id IN "
                     f"(SELECT id FROM searches WHERE origin={escape_sql(o)} "
                     f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)});\n")
             f.write(f"DELETE FROM searches WHERE origin={escape_sql(o)} "
                     f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)};\n")
 
-            # Insert search
+            # Insert search with explicit deterministic id
             content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
             f.write(
-                f"INSERT INTO searches(origin, destination, flight_date, direction, "
+                f"INSERT INTO searches(id, origin, destination, flight_date, direction, "
                 f"searched_at, status, error_message, content_hash) VALUES("
-                f"{escape_sql(s['origin'])}, {escape_sql(s['destination'])}, "
+                f"{sid}, {escape_sql(s['origin'])}, {escape_sql(s['destination'])}, "
                 f"{escape_sql(s['flight_date'])}, {escape_sql(s['direction'])}, "
                 f"{escape_sql(s['searched_at'])}, {escape_sql(s['status'])}, "
                 f"{escape_sql(s['error_message'])}, "
@@ -238,24 +263,25 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             )
             exported_searches += 1
 
-            search_ref = (
-                f"(SELECT id FROM searches WHERE origin={escape_sql(s['origin'])} "
-                f"AND destination={escape_sql(s['destination'])} "
-                f"AND flight_date={escape_sql(s['flight_date'])} "
-                f"AND direction={escape_sql(s['direction'])})"
-            )
-
-            for fl in flights:
+            # Multi-row INSERT for this search's flights — single statement
+            # using the explicit search_id, no FK subquery.
+            if flights:
+                values_rows = []
+                for fl in flights:
+                    values_rows.append(
+                        f"({sid}, {escape_sql(fl['airline'])}, "
+                        f"{escape_sql(strip_date_suffix(fl['departure_time']))}, "
+                        f"{escape_sql(strip_date_suffix(fl['arrival_time']))}, "
+                        f"{fl['depart_minutes']}, {fl['arrive_minutes']}, "
+                        f"{fl['price']}, {fl['stops']}, "
+                        f"{escape_sql(fl['arrival_ahead'])})"
+                    )
+                    exported_flights += 1
                 f.write(
-                    f"INSERT INTO flights(search_id, airline, departure_time, arrival_time, "
-                    f"depart_minutes, arrive_minutes, price, stops, arrival_ahead) VALUES("
-                    f"{search_ref}, {escape_sql(fl['airline'])}, "
-                    f"{escape_sql(strip_date_suffix(fl['departure_time']))}, {escape_sql(strip_date_suffix(fl['arrival_time']))}, "
-                    f"{fl['depart_minutes']}, {fl['arrive_minutes']}, "
-                    f"{fl['price']}, "
-                    f"{fl['stops']}, {escape_sql(fl['arrival_ahead'])});\n"
+                    "INSERT INTO flights(search_id, airline, departure_time, arrival_time, "
+                    "depart_minutes, arrive_minutes, price, stops, arrival_ahead) VALUES\n  "
+                    + ",\n  ".join(values_rows) + ";\n"
                 )
-                exported_flights += 1
 
     # Save hashes for next run
     save_current_hashes(current_hashes)
