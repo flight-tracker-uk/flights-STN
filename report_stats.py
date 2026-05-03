@@ -13,7 +13,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-API_URL = os.environ.get("STATS_API_URL", "https://flights-web.adam-661.workers.dev/api/workflow-stats")
+API_URL = os.environ.get("STATS_API_URL", "https://flight-finder.co.uk/api/workflow-stats")
 API_KEY = os.environ.get("STATS_API_KEY", "")
 
 
@@ -33,7 +33,7 @@ def post_stats(data: dict) -> bool:
             logger.info(f"Stats reported: {data.get('step')} {data.get('status')}")
             return True
         else:
-            logger.warning(f"Stats report failed: {resp.status_code} {resp.text}")
+            logger.warning(f"Stats report failed: POST {API_URL}?key=*** -> {resp.status_code} {resp.text}")
             return False
     except Exception as e:
         logger.warning(f"Stats report error: {e}")
