@@ -130,6 +130,24 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         logger.info("No changes — empty SQL dump")
         return dump_path
 
+    # Compute reference-table hashes so we can skip emitting unchanged
+    # airports/routes (card #385 option 3). We hash only the columns we'd
+    # actually write — last_scraped on routes is intentionally excluded so a
+    # timestamp-only refresh doesn't force a re-write.
+    import hashlib as _hashlib
+    airports = local.execute("SELECT * FROM airports").fetchall()
+    routes = local.execute("SELECT * FROM routes").fetchall()
+    airports_hash = _hashlib.md5(
+        "|".join(f"{a['iata_code']}/{a['name']}/{a['country']}/{a['is_origin']}" for a in airports).encode()
+    ).hexdigest()
+    routes_hash = _hashlib.md5(
+        "|".join(f"{r['origin']}/{r['destination']}/{r['dest_name']}/{r['is_active']}" for r in routes).encode()
+    ).hexdigest()
+    prev_airports_hash = previous_hashes.get("__airports__")
+    prev_routes_hash = previous_hashes.get("__routes__")
+    current_hashes["__airports__"] = airports_hash
+    current_hashes["__routes__"] = routes_hash
+
     with open(dump_path, "w") as f:
         # Ensure indexes and history table exist (compacted shape — see #367 #5).
         f.write("CREATE INDEX IF NOT EXISTS idx_flights_search_id ON flights(search_id);\n")
@@ -138,30 +156,41 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
                 "  flight_date TEXT NOT NULL, direction TEXT NOT NULL,\n"
                 "  price REAL NOT NULL, recorded_at TEXT NOT NULL\n);\n\n")
 
-        # Upsert airports
-        airports = local.execute("SELECT * FROM airports").fetchall()
-        for a in airports:
-            f.write(
-                f"INSERT INTO airports(iata_code, name, country, is_origin) VALUES("
-                f"{escape_sql(a['iata_code'])}, {escape_sql(a['name'])}, "
-                f"{escape_sql(a['country'])}, {a['is_origin']}) "
-                f"ON CONFLICT(iata_code) DO UPDATE SET name=excluded.name, "
-                f"country=excluded.country, is_origin=MAX(is_origin, excluded.is_origin);\n"
-            )
-        logger.info(f"Exported {len(airports)} airports")
+        # Upsert airports — only emit if the snapshot changed (#385 option 3),
+        # and use a qualified ON CONFLICT WHERE clause so even when emitted, no
+        # row_writes are charged for rows whose values are identical (#385 option 7).
+        if airports_hash != prev_airports_hash:
+            for a in airports:
+                f.write(
+                    f"INSERT INTO airports(iata_code, name, country, is_origin) VALUES("
+                    f"{escape_sql(a['iata_code'])}, {escape_sql(a['name'])}, "
+                    f"{escape_sql(a['country'])}, {a['is_origin']}) "
+                    f"ON CONFLICT(iata_code) DO UPDATE SET name=excluded.name, "
+                    f"country=excluded.country, is_origin=MAX(is_origin, excluded.is_origin) "
+                    f"WHERE airports.name != excluded.name "
+                    f"OR airports.country != excluded.country "
+                    f"OR airports.is_origin < excluded.is_origin;\n"
+                )
+            logger.info(f"Exported {len(airports)} airports (hash changed)")
+        else:
+            logger.info(f"Skipped {len(airports)} airports (hash unchanged)")
 
-        # Upsert routes
-        routes = local.execute("SELECT * FROM routes").fetchall()
-        for r in routes:
-            f.write(
-                f"INSERT INTO routes(origin, destination, dest_name, is_active, last_scraped) VALUES("
-                f"{escape_sql(r['origin'])}, {escape_sql(r['destination'])}, "
-                f"{escape_sql(r['dest_name'])}, {r['is_active']}, datetime('now')) "
-                f"ON CONFLICT(origin, destination) DO UPDATE SET "
-                f"dest_name=excluded.dest_name, is_active=excluded.is_active, last_scraped=datetime('now');\n"
-            )
-        f.write("\n")
-        logger.info(f"Exported {len(routes)} routes")
+        # Upsert routes — same hash-skip + qualified UPSERT pattern.
+        if routes_hash != prev_routes_hash:
+            for r in routes:
+                f.write(
+                    f"INSERT INTO routes(origin, destination, dest_name, is_active, last_scraped) VALUES("
+                    f"{escape_sql(r['origin'])}, {escape_sql(r['destination'])}, "
+                    f"{escape_sql(r['dest_name'])}, {r['is_active']}, datetime('now')) "
+                    f"ON CONFLICT(origin, destination) DO UPDATE SET "
+                    f"dest_name=excluded.dest_name, is_active=excluded.is_active, last_scraped=datetime('now') "
+                    f"WHERE routes.dest_name != excluded.dest_name "
+                    f"OR routes.is_active != excluded.is_active;\n"
+                )
+            f.write("\n")
+            logger.info(f"Exported {len(routes)} routes (hash changed)")
+        else:
+            logger.info(f"Skipped {len(routes)} routes (hash unchanged)")
 
         # Only delete and re-insert CHANGED searches
         history_count = 0
