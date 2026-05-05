@@ -1,4 +1,4 @@
-"""London Stansted Airport (STN) destinations — April 2026."""
+"""London Stansted Airport (STN) destinations — May 2026."""
 
 DESTINATIONS = {
     "STN": {
@@ -11,7 +11,6 @@ DESTINATIONS = {
             "AGP": "Malaga",
             "ALC": "Alicante",
             "ALG": "Algiers",
-            "AMM": "Amman",
             "AMS": "Amsterdam",
             "AOI": "Ancona",
             "ARN": "Stockholm",
@@ -49,7 +48,6 @@ DESTINATIONS = {
             "DBV": "Dubrovnik",
             "DLM": "Dalaman",
             "DUB": "Dublin",
-            "DXB": "Dubai",
             "EDI": "Edinburgh",
             "EFL": "Kefalonia",
             "EIN": "Eindhoven",
@@ -76,6 +74,7 @@ DESTINATIONS = {
             "HAM": "Hamburg",
             "HEL": "Helsinki",
             "HER": "Heraklion",
+            "HHN": "Frankfurt Hahn",
             "IBZ": "Ibiza",
             "INN": "Innsbruck",
             "IST": "Istanbul",
@@ -152,7 +151,6 @@ DESTINATIONS = {
             "SNN": "Shannon",
             "SOF": "Sofia",
             "SPU": "Split",
-            "SSH": "Sharm El Sheikh",
             "STR": "Stuttgart",
             "SUF": "Lamezia Terme",
             "SVQ": "Seville",
@@ -164,7 +162,6 @@ DESTINATIONS = {
             "TIV": "Tivat",
             "TLL": "Tallinn",
             "TLS": "Toulouse",
-            "TLV": "Tel Aviv",
             "TNG": "Tangier",
             "TPS": "Trapani",
             "TRF": "Oslo Torp",
@@ -172,6 +169,8 @@ DESTINATIONS = {
             "TRS": "Trieste",
             "TSF": "Venice Treviso",
             "TUF": "Tours",
+            "TUN": "Tunis",
+            "TZX": "Trabzon",
             "VCE": "Venice Marco Polo",
             "VGO": "Vigo",
             "VIE": "Vienna",
