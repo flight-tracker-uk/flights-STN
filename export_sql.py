@@ -231,15 +231,24 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             # to price_history — append-only, never deleted. The price-history
             # modal only ever uses MIN(price) per scrape window, so storing
             # every flight option was wasted writes (#367 item #5).
+            #
+            # Additionally skip the write when the cheapest price hasn't changed
+            # since the last emit for this quad — ~17% of historical rows were
+            # flat-price duplicates. Tracked via previous_hashes.json (PH: prefix
+            # to avoid collision with content_hash keys). See card #403.
             if flights:
                 cheapest_price = min(fl["price"] for fl in flights)
-                f.write(
-                    f"INSERT INTO price_history(origin, destination, flight_date, direction, "
-                    f"price, recorded_at) VALUES("
-                    f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
-                    f"{cheapest_price}, {escape_sql(searched_at)});\n"
-                )
-                history_count += 1
+                ph_key = f"PH:{o}|{d}|{fd}|{direction}"
+                prev_price = previous_hashes.get(ph_key)
+                current_hashes[ph_key] = cheapest_price
+                if prev_price != cheapest_price:
+                    f.write(
+                        f"INSERT INTO price_history(origin, destination, flight_date, direction, "
+                        f"price, recorded_at) VALUES("
+                        f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
+                        f"{cheapest_price}, {escape_sql(searched_at)});\n"
+                    )
+                    history_count += 1
 
             # Delete old data for this specific search. The DELETE FROM flights
             # uses the by-content-key subquery so legacy auto-id flight rows
@@ -250,16 +259,16 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             f.write(f"DELETE FROM searches WHERE origin={escape_sql(o)} "
                     f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)};\n")
 
-            # Insert search with explicit deterministic id
-            content_hash = s['content_hash'] if 'content_hash' in s.keys() else ''
+            # Insert search with explicit deterministic id. content_hash dropped
+            # from D1 in card #403 — it was unused by the Worker and only useful
+            # locally where it lives in previous_hashes.json.
             f.write(
                 f"INSERT INTO searches(id, origin, destination, flight_date, direction, "
-                f"searched_at, status, error_message, content_hash) VALUES("
+                f"searched_at, status, error_message) VALUES("
                 f"{sid}, {escape_sql(s['origin'])}, {escape_sql(s['destination'])}, "
                 f"{escape_sql(s['flight_date'])}, {escape_sql(s['direction'])}, "
                 f"{escape_sql(s['searched_at'])}, {escape_sql(s['status'])}, "
-                f"{escape_sql(s['error_message'])}, "
-                f"{escape_sql(content_hash)});\n"
+                f"{escape_sql(s['error_message'])});\n"
             )
             exported_searches += 1
 
