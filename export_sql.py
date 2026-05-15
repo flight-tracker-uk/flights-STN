@@ -164,10 +164,13 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     with open(dump_path, "w") as f:
         # Ensure indexes and history table exist (compacted shape — see #367 #5).
         f.write("CREATE INDEX IF NOT EXISTS idx_flights_search_id ON flights(search_id);\n")
-        f.write("CREATE TABLE IF NOT EXISTS price_history (\n"
-                "  id INTEGER PRIMARY KEY, origin TEXT NOT NULL, destination TEXT NOT NULL,\n"
-                "  flight_date TEXT NOT NULL, direction TEXT NOT NULL,\n"
-                "  price REAL NOT NULL, recorded_at TEXT NOT NULL\n);\n\n")
+        # price_history table emission disabled by card #412 — feature switched
+        # off to cut D1 row I/O. Table is kept in D1 (drains via nightly prune)
+        # but no new rows are written. Re-enable by un-commenting below.
+        # f.write("CREATE TABLE IF NOT EXISTS price_history (\n"
+        #         "  id INTEGER PRIMARY KEY, origin TEXT NOT NULL, destination TEXT NOT NULL,\n"
+        #         "  flight_date TEXT NOT NULL, direction TEXT NOT NULL,\n"
+        #         "  price REAL NOT NULL, recorded_at TEXT NOT NULL\n);\n\n")
 
         # Upsert airports — only emit if the snapshot changed (#385 option 3),
         # and use a qualified ON CONFLICT WHERE clause so even when emitted, no
@@ -236,19 +239,20 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             # since the last emit for this quad — ~17% of historical rows were
             # flat-price duplicates. Tracked via previous_hashes.json (PH: prefix
             # to avoid collision with content_hash keys). See card #403.
-            if flights:
-                cheapest_price = min(fl["price"] for fl in flights)
-                ph_key = f"PH:{o}|{d}|{fd}|{direction}"
-                prev_price = previous_hashes.get(ph_key)
-                current_hashes[ph_key] = cheapest_price
-                if prev_price != cheapest_price:
-                    f.write(
-                        f"INSERT INTO price_history(origin, destination, flight_date, direction, "
-                        f"price, recorded_at) VALUES("
-                        f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
-                        f"{cheapest_price}, {escape_sql(searched_at)});\n"
-                    )
-                    history_count += 1
+            # price_history emission disabled by card #412.
+            # if flights:
+            #     cheapest_price = min(fl["price"] for fl in flights)
+            #     ph_key = f"PH:{o}|{d}|{fd}|{direction}"
+            #     prev_price = previous_hashes.get(ph_key)
+            #     current_hashes[ph_key] = cheapest_price
+            #     if prev_price != cheapest_price:
+            #         f.write(
+            #             f"INSERT INTO price_history(origin, destination, flight_date, direction, "
+            #             f"price, recorded_at) VALUES("
+            #             f"{escape_sql(o)}, {escape_sql(d)}, {escape_sql(fd)}, {escape_sql(direction)}, "
+            #             f"{cheapest_price}, {escape_sql(searched_at)});\n"
+            #         )
+            #         history_count += 1
 
             # Delete old data for this specific search. The DELETE FROM flights
             # uses the by-content-key subquery so legacy auto-id flight rows
