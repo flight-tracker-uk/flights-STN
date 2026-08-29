@@ -1,4 +1,7 @@
-fast-flights>=2.2
+# Pinned: fast-flights 3.x imports typing_extensions without declaring it,
+# which fails every search in CI. See Fizzy #424.
+fast-flights==2.2
 primp>=0.15.0,<1.0
 rich>=13.0
 requests
+typing_extensions
