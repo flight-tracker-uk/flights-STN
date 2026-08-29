@@ -219,11 +219,13 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         # All flights for the search are batched into ONE multi-row INSERT,
         # using the explicit deterministic id — no FK subquery needed.
         history_count = 0
+        exported_months = set()
         for s in changed_searches:
             o, d, fd = s["origin"], s["destination"], s["flight_date"]
             direction = s["direction"]
             searched_at = s["searched_at"]
             sid = stable_search_id(o, d, fd, direction)
+            exported_months.add(fd[:7])
 
             # Get flights for this search
             flights = local.execute("""
@@ -295,6 +297,16 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
                     "depart_minutes, arrive_minutes, price, stops, arrival_ahead) VALUES\n  "
                     + ",\n  ".join(values_rows) + ";\n"
                 )
+
+        # Invalidate cached /api/* responses for the months we just wrote.
+        # cacheGet only checks expires_at, so without this a fresh import stays
+        # invisible for up to the 1h TTL. Also reap already-expired rows: nothing
+        # ever deletes them and they had grown to ~40MB of dead value blobs.
+        # See cards #425 and #367.
+        f.write("\n-- Cache invalidation (card #425)\n")
+        f.write("DELETE FROM api_cache WHERE expires_at <= CAST(strftime('%s','now') AS INTEGER) * 1000;\n")
+        for month in sorted(exported_months):
+            f.write(f"DELETE FROM api_cache WHERE key LIKE '%{month}%';\n")
 
     # Save hashes for next run
     save_current_hashes(current_hashes)
