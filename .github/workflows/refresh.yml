@@ -596,3 +596,19 @@ jobs:
         with:
           path: ~/.flightcache/previous_hashes.json
           key: hashes-${{ matrix.destination }}-${{ github.run_id }}
+
+      - name: Fail if no searches completed
+        if: always() && steps.filter.outputs.skip != 'true'
+        run: |
+          STATS="$HOME/.flightcache/last_stats.json"
+          if [ ! -f "$STATS" ]; then
+            echo "::error::Scraper produced no stats file — it did not complete a single search."
+            exit 1
+          fi
+          COMPLETED=$(python -c "import json; print(json.load(open('$STATS')).get('completed', 0))")
+          FAILED=$(python -c "import json; print(json.load(open('$STATS')).get('failed', 0))")
+          echo "Searches completed: ${COMPLETED}, failed: ${FAILED}"
+          if [ "$COMPLETED" -eq 0 ]; then
+            echo "::error::0 searches completed (${FAILED} failed) — failing the job. A green run that collects no data is how the fast-flights 3.x breakage went unnoticed for 2.5 months. See Fizzy #424."
+            exit 1
+          fi
