@@ -259,11 +259,20 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
             # Delete old data for this specific search. The DELETE FROM flights
             # uses the by-content-key subquery so legacy auto-id flight rows
             # still get cleaned up during the auto-id -> hash-id transition.
+            # Scope the delete by direction too. searches is
+            # UNIQUE(origin, destination, flight_date, direction), so a pair like
+            # BRS->DUB legitimately holds two rows: the outbound written by
+            # flights-BRS and the return written by flights-DUB. Without the
+            # direction clause each repo's import wiped the other's leg, and the
+            # last one to run won — which silently removed one half of every
+            # route between two scraped origins. See card #455.
             f.write(f"DELETE FROM flights WHERE search_id IN "
                     f"(SELECT id FROM searches WHERE origin={escape_sql(o)} "
-                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)});\n")
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)} "
+                    f"AND direction={escape_sql(direction)});\n")
             f.write(f"DELETE FROM searches WHERE origin={escape_sql(o)} "
-                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)};\n")
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)} "
+                    f"AND direction={escape_sql(direction)};\n")
 
             # Insert search with explicit deterministic id. content_hash dropped
             # from D1 in card #403 — it was unused by the Worker and only useful

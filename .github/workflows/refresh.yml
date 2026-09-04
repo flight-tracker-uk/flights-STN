@@ -410,8 +410,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.flightcache/previous_hashes.json
-          key: hashes-${{ matrix.destination }}
-          restore-keys: hashes-${{ matrix.destination }}
+          key: hashes-v2-${{ matrix.destination }}
+          restore-keys: hashes-v2-${{ matrix.destination }}
 
       - name: Check if destination is in filter
         if: github.event.inputs.destinations != ''
@@ -595,7 +595,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.flightcache/previous_hashes.json
-          key: hashes-${{ matrix.destination }}-${{ github.run_id }}
+          key: hashes-v2-${{ matrix.destination }}-${{ github.run_id }}
 
       - name: Fail if no searches completed
         if: always() && steps.filter.outputs.skip != 'true'
