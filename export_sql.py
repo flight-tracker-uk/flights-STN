@@ -19,8 +19,10 @@ CACHE_DIR = Path.home() / ".flightcache"
 DB_PATH = CACHE_DIR / "flights.db"
 DUMP_PATH = CACHE_DIR / "d1_import.sql"
 HASH_PATH = CACHE_DIR / "previous_hashes.json"
-# Marker key in previous_hashes.json, set once the card #777 stale-row sweep has run
-STALE_PURGE_MARKER = "__stale_purge_777__"
+# A leg is deleted from D1 only after this many consecutive nightly scrapes
+# found no qualifying flights. A single empty scrape isn't trustworthy: Google
+# sometimes serves CI an empty page for a date that does have flights (card #777).
+EMPTY_RUNS_BEFORE_DELETE = 3
 
 
 def escape_sql(val) -> str:
@@ -83,13 +85,6 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     exported_flights = 0
     removed_count = 0
 
-    # One-off sweep (card #777): before the fix below, a leg that went from
-    # having flights to no_results was skipped and its old flights stayed in
-    # D1 for good. Until this marker is in the hash cache, every no_results
-    # search emits a DELETE whatever its hash, to clear those ghosts out.
-    stale_purge_pending = STALE_PURGE_MARKER not in previous_hashes
-    current_hashes[STALE_PURGE_MARKER] = 1
-
     # Collect all searches and determine which changed
     all_searches = local.execute("SELECT * FROM searches").fetchall()
     changed_searches = []
@@ -101,24 +96,33 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         current_hashes[key] = content_hash
 
         prev_hash = previous_hashes.get(key)
+        # Consecutive empty scrapes for this leg, capped at the threshold.
+        # Not carried over on success, so any run that finds flights resets it.
+        empty_key = f"EMPTY:{key}"
+        prev_empty_runs = previous_hashes.get(empty_key, 0)
 
         # A failed scrape tells us nothing about the leg, so keep whatever D1
-        # holds and carry the previous hash forward. Saving "" here would make
-        # a later no_results look unchanged, so it would never be removed (#777).
+        # holds and carry the previous state forward. Saving "" here would make
+        # a later no_results look unchanged (#777).
         if s['status'] == 'error':
             if prev_hash is not None:
                 current_hashes[key] = prev_hash
+            if prev_empty_runs:
+                current_hashes[empty_key] = prev_empty_runs
             skipped_no_results += 1
             continue
 
         # no_results rows are never inserted into D1 (card #385 option 1): the
         # Worker only reads status='success' and these rows were 62% of the
-        # table. But if the leg had flights before, the old flights are still
-        # in D1 and still on the site, so delete them (card #777). That covers
-        # prev_hash None too, because a hash cache that was lost or never
-        # existed can't vouch for what D1 holds.
+        # table. But a leg that used to have flights keeps them in D1, so the
+        # site showed ghost flights for good (card #777). Once the leg has been
+        # empty for EMPTY_RUNS_BEFORE_DELETE runs in a row, delete it from D1,
+        # exactly once. Legs that were already empty before this change count
+        # up from zero too, which clears the ghosts that built up earlier.
         if s['status'] != 'success':
-            if prev_hash != '' or stale_purge_pending:
+            empty_runs = min(prev_empty_runs + 1, EMPTY_RUNS_BEFORE_DELETE)
+            current_hashes[empty_key] = empty_runs
+            if empty_runs == EMPTY_RUNS_BEFORE_DELETE and prev_empty_runs < EMPTY_RUNS_BEFORE_DELETE:
                 removed_searches.append(s)
             skipped_no_results += 1
             continue
@@ -157,8 +161,6 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     hash_diffs = len(matched_keys) - hash_matches
     logger.info(f"Matched keys: {hash_matches} same hash, {hash_diffs} hash changed")
     logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped), {skipped_no_results} non-success (not inserted into D1), {len(removed_searches)} of those deleted from D1")
-    if stale_purge_pending:
-        logger.info("Stale-row sweep (card #777): deleting every no_results search from D1 this run")
 
     if not changed_searches and not removed_searches:
         # Nothing changed — write minimal SQL
@@ -365,7 +367,7 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     size_kb = dump_path.stat().st_size / 1024
     logger.info(f"Exported {exported_searches} searches, {exported_flights} flights, {history_count} price history records ({size_kb:.0f} KB)")
     logger.info(f"Skipped {skipped_unchanged} unchanged searches")
-    logger.info(f"Deleted {removed_count} searches that no longer have flights")
+    logger.info(f"Deleted {removed_count} searches empty for {EMPTY_RUNS_BEFORE_DELETE} runs in a row")
 
     # Write export stats JSON for CI reporting
     export_stats = {
