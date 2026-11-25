@@ -19,6 +19,8 @@ CACHE_DIR = Path.home() / ".flightcache"
 DB_PATH = CACHE_DIR / "flights.db"
 DUMP_PATH = CACHE_DIR / "d1_import.sql"
 HASH_PATH = CACHE_DIR / "previous_hashes.json"
+# Marker key in previous_hashes.json, set once the card #777 stale-row sweep has run
+STALE_PURGE_MARKER = "__stale_purge_777__"
 
 
 def escape_sql(val) -> str:
@@ -79,10 +81,19 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     skipped_unchanged = 0
     exported_searches = 0
     exported_flights = 0
+    removed_count = 0
+
+    # One-off sweep (card #777): before the fix below, a leg that went from
+    # having flights to no_results was skipped and its old flights stayed in
+    # D1 for good. Until this marker is in the hash cache, every no_results
+    # search emits a DELETE whatever its hash, to clear those ghosts out.
+    stale_purge_pending = STALE_PURGE_MARKER not in previous_hashes
+    current_hashes[STALE_PURGE_MARKER] = 1
 
     # Collect all searches and determine which changed
     all_searches = local.execute("SELECT * FROM searches").fetchall()
     changed_searches = []
+    removed_searches = []
     skipped_no_results = 0
     for s in all_searches:
         key = f"{s['origin']}|{s['destination']}|{s['flight_date']}|{s['direction']}"
@@ -90,18 +101,31 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         current_hashes[key] = content_hash
 
         prev_hash = previous_hashes.get(key)
-        # Skip if hash matches (including both being empty = no flights found both times)
-        if (content_hash == prev_hash) and prev_hash is not None:
-            skipped_unchanged += 1
+
+        # A failed scrape tells us nothing about the leg, so keep whatever D1
+        # holds and carry the previous hash forward. Saving "" here would make
+        # a later no_results look unchanged, so it would never be removed (#777).
+        if s['status'] == 'error':
+            if prev_hash is not None:
+                current_hashes[key] = prev_hash
+            skipped_no_results += 1
             continue
 
-        # Skip syncing no_results / error rows to D1 (card #385 option 1).
-        # The Worker's read paths all filter status='success', and these rows
-        # accumulated to 62% of the searches table before being pruned. Local
-        # SQLite still records them so the hash-skip on subsequent runs is
-        # unaffected.
+        # no_results rows are never inserted into D1 (card #385 option 1): the
+        # Worker only reads status='success' and these rows were 62% of the
+        # table. But if the leg had flights before, the old flights are still
+        # in D1 and still on the site, so delete them (card #777). That covers
+        # prev_hash None too, because a hash cache that was lost or never
+        # existed can't vouch for what D1 holds.
         if s['status'] != 'success':
+            if prev_hash != '' or stale_purge_pending:
+                removed_searches.append(s)
             skipped_no_results += 1
+            continue
+
+        # Skip if hash matches
+        if (content_hash == prev_hash) and prev_hash is not None:
+            skipped_unchanged += 1
             continue
 
         changed_searches.append(s)
@@ -132,9 +156,11 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     hash_matches = sum(1 for k in matched_keys if current_hashes[k] == previous_hashes[k])
     hash_diffs = len(matched_keys) - hash_matches
     logger.info(f"Matched keys: {hash_matches} same hash, {hash_diffs} hash changed")
-    logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped), {skipped_no_results} non-success (skipped, not synced to D1)")
+    logger.info(f"Searches: {len(all_searches)} total, {len(changed_searches)} changed, {skipped_unchanged} unchanged (skipped), {skipped_no_results} non-success (not inserted into D1), {len(removed_searches)} of those deleted from D1")
+    if stale_purge_pending:
+        logger.info("Stale-row sweep (card #777): deleting every no_results search from D1 this run")
 
-    if not changed_searches:
+    if not changed_searches and not removed_searches:
         # Nothing changed — write minimal SQL
         with open(dump_path, "w") as f:
             f.write("-- No changes detected, nothing to import\nSELECT 1;\n")
@@ -220,6 +246,21 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
         # using the explicit deterministic id — no FK subquery needed.
         history_count = 0
         exported_months = set()
+
+        # Legs that no longer have any qualifying flights: delete whatever D1
+        # still holds for them and insert nothing (card #777).
+        for s in removed_searches:
+            o, d, fd, direction = s["origin"], s["destination"], s["flight_date"], s["direction"]
+            exported_months.add(fd[:7])
+            f.write(f"DELETE FROM flights WHERE search_id IN "
+                    f"(SELECT id FROM searches WHERE origin={escape_sql(o)} "
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)} "
+                    f"AND direction={escape_sql(direction)});\n")
+            f.write(f"DELETE FROM searches WHERE origin={escape_sql(o)} "
+                    f"AND destination={escape_sql(d)} AND flight_date={escape_sql(fd)} "
+                    f"AND direction={escape_sql(direction)};\n")
+            removed_count += 1
+
         for s in changed_searches:
             o, d, fd = s["origin"], s["destination"], s["flight_date"]
             direction = s["direction"]
@@ -324,12 +365,14 @@ def export(db_path: Path = DB_PATH, dump_path: Path = DUMP_PATH) -> Path:
     size_kb = dump_path.stat().st_size / 1024
     logger.info(f"Exported {exported_searches} searches, {exported_flights} flights, {history_count} price history records ({size_kb:.0f} KB)")
     logger.info(f"Skipped {skipped_unchanged} unchanged searches")
+    logger.info(f"Deleted {removed_count} searches that no longer have flights")
 
     # Write export stats JSON for CI reporting
     export_stats = {
         "exported_searches": exported_searches,
         "exported_flights": exported_flights,
         "skipped_unchanged": skipped_unchanged,
+        "removed_searches": removed_count,
         "changed_searches": len(changed_searches),
         "total_searches": len(all_searches),
         "history_records": history_count,
